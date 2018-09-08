@@ -4,62 +4,35 @@ import traceback
 import pickle
 import threading
 import time
+from requests_html import HTMLSession
 
 #handling specific exceptions
 import atexit
-import gc
 
-MAX_SIZE = 50
-MIN_SIZE = 30
+MAX_SIZE = 40
+MIN_SIZE = 20
 
 proxies = []
 proxy_rank = {}
 
 #RUN ON THREAD
 
-def get_proxies_from_file():
+def get_proxies_from_file(): #call after getting proxies
 	curr_proxies = []
-	try:
-		lines = [line.rstrip('\n') for line in open('proxies.txt')]
-		for line in lines:
-			curr_proxies.append(f'{line}')
-			
-	except FileNotFoundError:
-		print("Can't find proxies.txt... Creating new one")
-		
-	finally:
-		return curr_proxies
-
-def get_rank_from_file(): #call after getting proxies
+	curr_rank = {}
 	try:
 		with open('proxy_rank.txt', 'rb') as f:
 			curr_rank = pickle.load(f)
 			
-		print(curr_rank)
-		
-		for proxy in proxies:
-			if not proxy in curr_rank:
-				curr_rank[proxy] = 0
-		
-		print(curr_rank)
-		
-		proxies_to_del_from_rank = []
-		for proxy, rank in curr_rank.items():
-			if not proxy in proxies:
-				proxies_to_del_from_rank.append(proxy)
-				
-		for proxy in proxies_to_del_from_rank:
-			del curr_rank[proxy]
-		
-		save_rank()
+		curr_proxies = list(curr_rank.keys())
 	
 	except:
 		print(traceback.format_exc())
-		print("Can't load proxy rank... Initializing...")
-		curr_rank = get_fresh_rank(proxies)
+		print("Can't load proxies... Initializing...")
+		#curr_rank = get_fresh_rank(curr_proxies)
 		
 	finally:
-		return curr_rank
+		return curr_proxies, curr_rank 
 
 def get_fresh_rank(proxies): 
 	print('Initializing proxy rank')
@@ -75,7 +48,7 @@ def rank_proxy(proxy, points):
 	elif proxy_rank[proxy] <= -100:
 			#proxy_rank[proxy] = -100
 			del_proxy(proxy)
-	save_rank()
+	save_proxies()
 
 	
 def get_proxies_from_web(amount=50):
@@ -102,39 +75,44 @@ def get_proxies_from_web(amount=50):
 					}
 
 	data = f'xpp={amount_val}&xf1=0&xf2=1&xf4=0&xf5=1' #xf2=ssl,xf5=http
+	
+	with HTMLSession() as s:
+		site = s.post(url, headers=headers, data=data)
+		site.html.render(reload=False, keep_page=True) #without reload it will download site again WITHOUT data=data 
+																									 #keep page to be sure about closing chromium
+		html = site.html.html
+	
+	s.close()
+	
+	matching_proxies = re.findall('<font class="spy\d\d">([\d.]+)<script type="text/javascript">.+?</font>(\d+)</font>', html) 
+	full_proxies = [ip + ':' + proxy for ip, proxy in matching_proxies]
+	return full_proxies
 
-	with requests.post(url, headers=headers, data=data) as r:
-		if r.ok:
-			content = r.text #text is encoded
-			new_proxies = re.findall('<font class=spy\d\d>([\d.]+)<script', content)
-			return new_proxies[:amount]
-		else:
-			print("Can't get new proxies from site")
-			return None
 
 
 def check_proxy(proxy):
 	my_proxy = {'https': 'http://' + str(proxy)}
-	url = 'http://httpbin.org/get'#'https://www.google.pl/'
+	headers = {'Connection': 'close',
+					'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; Win64; x64; rv:47.0) Gecko/20100101 Firefox/47.0'}
+	url = 'https://www.google.pl/'
 	try:
-		with requests.get(url, proxies=my_proxy, timeout=0.2) as r:
+		with requests.get(url,headers=headers, proxies=my_proxy, timeout=5) as r:
 			#print(r.headers)
 			if r.ok:
-				print(proxy, 'dziala, response time:', r.elapsed.total_seconds())
+				#print(proxy, 'works good, response time:', r.elapsed.total_seconds())
 				return True
 			else:
 				return False
 	except:
 		#print(traceback.format_exc())
-		print(proxy, 'nie działa')
+		#print(proxy, "works slow")
 		return False
 		
 		
 def add_proxy(new_proxy):
 	if len(proxies)+1 > MAX_SIZE: #+1 bcs i'll add new one
-		sorted_proxies = get_sorted_proxies()
 		for i in range(len(proxies)+1 - MAX_SIZE):
-			index = proxies.index(sorted_proxies.pop())
+			index = proxies.index(get_sorted_proxies().pop())
 			proxy_to_del = proxies[index]
 			del_proxy(proxy_to_del)
 
@@ -142,7 +120,7 @@ def add_proxy(new_proxy):
 	proxy_rank[new_proxy] = 0
 	
 	save_proxies()
-	save_rank()
+
 	
 	
 def del_proxy(proxy):
@@ -156,30 +134,22 @@ def del_proxy(proxy):
 		Appender(MAX_SIZE-MIN_SIZE).append_new_proxies()
 		
 	save_proxies()
-	save_rank()
+
 
 		
 def get_sorted_proxies():
 	if not proxies:
 		Appender(MAX_SIZE).start()
+		
 	sorted_rank = sorted(proxy_rank.items(), key=lambda kv: kv[1], reverse=True)
 	sorted_proxies = []
+
 	for proxy, rank in sorted_rank:
 		sorted_proxies.append(proxy)
 	return sorted_proxies
-
-
+		
+		
 def save_proxies():
-	try:
-		with open('proxies.txt', 'w') as f:
-			f.write('\n'.join(proxies))
-			print('Proxies saved')
-	except:
-		print(traceback.format_exc())
-		print("Can't save proxies")
-		
-		
-def save_rank():
 	try:
 		with open('proxy_rank.txt', 'wb') as f:
 			pickle.dump(proxy_rank, f, protocol=0)
@@ -204,12 +174,13 @@ class Appender():
 		
 		if check_all == False:
 			self.amount = 50
-			self.threads = 10
+			self.threads = 50
 		else:
 			self.amount = 500
-			self.threads = 20 #to fasten
+			self.threads = 500 #to fasten
 			
 		new_proxies = [proxy for proxy in get_proxies_from_web(self.amount) if proxy not in proxies]
+
 		if new_proxies:
 			#checking if there is at least 1 proxy for each chunk, if no - shrink threads to max
 			if not len(new_proxies) > self.threads:
@@ -239,18 +210,23 @@ class Appender():
 			self.stop = True 
 
 		if len(self.proxies_added) < self.count:
-			print("Got only " + str(len(self.proxies_added)) + " proxies, trying again...")
-			self.count = self.count-len(self.proxies_added)
-			self.append_new_proxies(check_all=True)
+			if check_all == False: #to be sure check_all won't be called x times bcs it can do infinity loop
+				print("Got only " + str(len(self.proxies_added)) + " proxies, trying again...")
+				self.count = self.count-len(self.proxies_added)
+				self.append_new_proxies(check_all=True)
+			else:
+				print("Can't find all proxies, got only " + str(len(self.proxies_added)))
 		
 		
 	def __chunk(self, new_proxies): #__chunk gets chunk of new_proxies
 		for proxy in new_proxies:
-			if len(self.proxies_added) > self.count or self.stop:
+			if len(self.proxies_added) >= self.count or self.stop:
 				break
 			if check_proxy(proxy):
-				add_proxy(proxy)
 				self.proxies_added.append(proxy)
+				if not self.stop: #to be sure
+					add_proxy(proxy)
+				
 				
 
 class Supervisor():
@@ -290,47 +266,33 @@ class Supervisor():
 					curr_proxy = proxies[i]
 					if check_proxy(curr_proxy):
 						#print('Good proxy', curr_proxy)
-						rank_proxy(curr_proxy, 5)
+						if curr_proxy in proxy_rank: #bcs it can be changed
+							rank_proxy(curr_proxy, 5)
 					else:
 						#print('Bad proxy', curr_proxy)
-						rank_proxy(curr_proxy, -5)
+						if curr_proxy in proxy_rank:
+							rank_proxy(curr_proxy, -5)
 				except IndexError: #can occur when something is deleting on thread
 					print('IndexError')
 					break
 			
 def wait_for_main_thread():
 	pass
-	# for obj in gc.get_objects():
-		# if isinstance(obj, Supervisor):
-			# obj.stop()
+
 	
 atexit.register(wait_for_main_thread) #https://stackoverflow.com/questions/45267439/fatal-python-error-and-bufferedwriter
 
-proxies = get_proxies_from_file()
+proxies, proxy_rank = get_proxies_from_file()
 
-if proxies:
-	proxy_rank = get_rank_from_file()
-else:
-	proxy_rank = get_fresh_rank(proxies)
 
 if len(proxies) < MAX_SIZE:
 	Appender(MAX_SIZE-len(proxies)).append_new_proxies()
 
-s = Supervisor()
-s.start()
+#print(get_proxies_from_web(100))
+Supervisor().start()
 
-time.sleep(5)
 
-#s.stop()
-print(get_sorted_proxies())
-#print(threading.enumerate()[2])
-#Supervisor().start()
+#time.sleep(10)
 
-#print(proxies)
-#print(len(proxies))
 
-#rank_proxy_init(proxies)
-#proxy_rank = read_rank()
 
-#zrobić przy get_sorted_proxies sprawdzanie czy są w ogóle jakieś proxies, jak nie ma to szybko zrobić je i zwrócić
-#gdzieś przy proxy_rank jest luka, bo nie jest usuwany 
