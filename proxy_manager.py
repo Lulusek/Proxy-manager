@@ -4,13 +4,19 @@ import traceback
 import pickle
 import threading
 import time
+import fili_links
 from requests_html import HTMLSession
+from urllib.request import urlopen
 
 #handling specific exceptions
 import atexit
 
+s = HTMLSession() #i need global htmlsession bcs i can't create new one in thread other than main
+s.browser					#https://github.com/kennethreitz/requests-html/issues/155
+
+
 MAX_SIZE = 40
-MIN_SIZE = 20
+MIN_SIZE = 10
 
 proxies = []
 proxy_rank = {}
@@ -76,39 +82,63 @@ def get_proxies_from_web(amount=50):
 
 	data = f'xpp={amount_val}&xf1=0&xf2=1&xf4=0&xf5=1' #xf2=ssl,xf5=http
 	
-	with HTMLSession() as s:
-		site = s.post(url, headers=headers, data=data)
-		site.html.render(reload=False, keep_page=True) #without reload it will download site again WITHOUT data=data 
+	#with HTMLSession() as s:
+	site = s.post(url, headers=headers, data=data)
+	site.html.render(reload=False)#, keep_page=True) #without reload it will download site again WITHOUT data=data 
 																									 #keep page to be sure about closing chromium
-		html = site.html.html
+
+	html = site.html.html
 	
-	s.close()
+	#with open('a.html', 'w+') as f:
+	#	f.write(html)
+	
+	#s.close()
 	
 	matching_proxies = re.findall('<font class="spy\d\d">([\d.]+)<script type="text/javascript">.+?</font>(\d+)</font>', html) 
 	full_proxies = [ip + ':' + proxy for ip, proxy in matching_proxies]
+	#print(full_proxies)
 	return full_proxies
 
 
-
+test_url = 'https://fili.cc/embed?type=episode&code=585107ee991f90203df583ca&code2=585107ee991f90203df583d7&salt=5b700f1e88beda06d556ca26'
+CHANGING_URL = False
 def check_proxy(proxy):
 	my_proxy = {'https': 'http://' + str(proxy)}
-	headers = {'Connection': 'close',
-					'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; Win64; x64; rv:47.0) Gecko/20100101 Firefox/47.0'}
-	url = 'https://www.google.pl/'
+	headers = {
+					'Connection': 'close',
+					'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; Win64; x64; rv:47.0) Gecko/20100101 Firefox/47.0'
+					}
 	try:
-		with requests.get(url,headers=headers, proxies=my_proxy, timeout=5) as r:
+		while CHANGING_URL:
+			time.sleep(0.1)
+			
+		with requests.get(test_url, headers=headers, proxies=my_proxy, timeout=5) as r:
 			#print(r.headers)
+			if not 'Content-Encoding' in r.headers: #test url is bad
+				if not CHANGING_URL:
+					change_test_url()
 			if r.ok:
+				re.search("var url = '(.+)';", r.text).group(1) #i need to be sure it can avoid captcha
 				#print(proxy, 'works good, response time:', r.elapsed.total_seconds())
 				return True
 			else:
 				return False
 	except:
 		#print(traceback.format_exc())
-		#print(proxy, "works slow")
+		#print(proxy, "works bad")
 		return False
 		
-		
+
+def change_test_url():
+	print('Changing test url')
+	global CHANGING_URL
+	CHANGING_URL = True
+	global test_url
+	test_url = fili_links.get('https://fili.cc/serial/forever/s01e02/look-before-you-leap/588', s)[0]
+	print('test url:', test_url)
+	CHANGING_URL = False
+	
+	
 def add_proxy(new_proxy):
 	if len(proxies)+1 > MAX_SIZE: #+1 bcs i'll add new one
 		for i in range(len(proxies)+1 - MAX_SIZE):
@@ -121,7 +151,6 @@ def add_proxy(new_proxy):
 	
 	save_proxies()
 
-	
 	
 def del_proxy(proxy):
 	print('Deleting proxy:', proxy)
@@ -136,7 +165,6 @@ def del_proxy(proxy):
 	save_proxies()
 
 
-		
 def get_sorted_proxies():
 	if not proxies:
 		Appender(MAX_SIZE).start()
@@ -226,8 +254,7 @@ class Appender():
 				self.proxies_added.append(proxy)
 				if not self.stop: #to be sure
 					add_proxy(proxy)
-				
-				
+							
 
 class Supervisor():
 	def start(self):
@@ -251,6 +278,10 @@ class Supervisor():
 		while True:
 			if self.stop == True:
 				break
+			
+			while not self.have_connection():
+				time.sleep(3)
+				
 			time.sleep(1)
 			
 			curr_start = start
@@ -273,26 +304,42 @@ class Supervisor():
 						if curr_proxy in proxy_rank:
 							rank_proxy(curr_proxy, -5)
 				except IndexError: #can occur when something is deleting on thread
-					print('IndexError')
+					print('IndexError (its still ok)')
 					break
-			
+		
+	def have_connection(self):
+		try:
+			with urlopen(url='https://google.pl'): # mam internet, więc zawinił jakiś z komponentów
+				pass
+			return True
+		except:
+			print('NIE MAM POŁĄCZENIA Z NETEM')
+			return False
+		
 def wait_for_main_thread():
-	pass
+	print('CLOSING PROXY MANAGER')
+	s.browser.close()
+	s.close()
 
 	
-atexit.register(wait_for_main_thread) #https://stackoverflow.com/questions/45267439/fatal-python-error-and-bufferedwriter
-
-proxies, proxy_rank = get_proxies_from_file()
-
-
-if len(proxies) < MAX_SIZE:
-	Appender(MAX_SIZE-len(proxies)).append_new_proxies()
-
-#print(get_proxies_from_web(100))
-Supervisor().start()
+#atexit.register(wait_for_main_thread) #https://stackoverflow.com/questions/45267439/fatal-python-error-and-bufferedwriter
+def start():
+	global proxies
+	global proxy_rank
+	if not proxies:
+		proxies, proxy_rank = get_proxies_from_file()
 
 
-#time.sleep(10)
+		if len(proxies) < (MAX_SIZE+MIN_SIZE)/2:
+			Appender((MAX_SIZE+MIN_SIZE)-len(proxies)).append_new_proxies()
+
+		#print(get_proxies_from_web(100))
+		Supervisor().start()
+
+	# for proxy in proxies:
+		# check_proxy(proxy)
+
+	#time.sleep(10)
 
 
 
